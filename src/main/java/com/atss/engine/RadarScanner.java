@@ -1,5 +1,6 @@
 package com.atss.engine;
 
+import com.atss.detection.CollisionDetector;
 import com.atss.model.Aircraft;
 
 import java.util.Collection;
@@ -41,6 +42,9 @@ public class RadarScanner {
      * Must return a thread-safe view (e.g., from ConcurrentHashMap.values()).
      */
     private final Supplier<Collection<Aircraft>> aircraftSupplier;
+
+    /** Collision detection engine invoked after each sweep. */
+    private final CollisionDetector collisionDetector = new CollisionDetector();
 
     /** Running count of completed radar sweeps. */
     private final AtomicInteger sweepCount = new AtomicInteger(0);
@@ -127,6 +131,11 @@ public class RadarScanner {
                 for (Aircraft ac : aircraft) {
                     ac.updatePosition();
                     System.out.println("  " + ac);
+                }
+
+                int alerts = collisionDetector.checkCollisions(aircraft);
+                if (alerts > 0) {
+                    System.out.printf("  ⚠ %d proximity violation(s) detected%n", alerts);
                 }
             }
 

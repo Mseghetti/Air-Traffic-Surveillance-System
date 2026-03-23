@@ -1,0 +1,798 @@
+AIR TRAFFIC SURVEILLANCE SYSTEM (ATSS) — EDUCATIONAL GUIDE
+===========================================================
+A Java Multi-Threading & OOP Deep Dive
+Built to Defense Aerospace Standards
+
+GitHub: https://github.com/Mseghetti/Air-Traffic-Surveillance-System
+Language: Java 21 (LTS)
+Architecture: Multi-threaded console application
+
+
+TABLE OF CONTENTS
+-----------------
+1. Project Overview
+2. How It Works (System Architecture)
+3. Phase 1 — Domain Modeling: Aircraft.java
+4. Phase 2 — The Radar Engine: RadarScanner.java
+5. Phase 3 — Thread-Safe Data Sharing: AircraftRegistry.java & Main.java
+6. Phase 4 — Collision Detection: CollisionDetector.java (upcoming)
+7. Key Java Concepts Summary
+8. How to Build & Run
+
+
+═══════════════════════════════════════════════════════════════
+1. PROJECT OVERVIEW
+═══════════════════════════════════════════════════════════════
+
+The Air Traffic Surveillance System (ATSS) is a multi-threaded Java console application that simulates a radar system tracking multiple aircraft in real-time. It demonstrates four core pillars of professional Java development:
+
+  • Object-Oriented Programming (encapsulation, validation, immutability)
+  • Concurrency (background threads, scheduled execution, thread safety)
+  • Thread-Safe Data Structures (ConcurrentHashMap, atomic operations)
+  • Algorithmic Problem Solving (collision detection, distance calculation)
+
+The system runs two threads simultaneously:
+  - The MAIN THREAD handles user interaction (adding/removing aircraft via console)
+  - The RADAR THREAD runs in the background, updating aircraft positions and checking for collisions every 2 seconds
+
+This mirrors real defense software where sensor processing runs on background threads while operators interact with the system on the main thread.
+
+
+═══════════════════════════════════════════════════════════════
+2. HOW IT WORKS (SYSTEM ARCHITECTURE)
+═══════════════════════════════════════════════════════════════
+
+The system has four components that work together:
+
+  ┌─────────────────────┐         ┌──────────────────────┐
+  │     MAIN THREAD     │         │    RADAR THREAD      │
+  │  (Console Input)    │         │  (Background Loop)   │
+  │                     │         │                      │
+  │  User types "add"   │         │  Every 2 seconds:    │
+  │  → prompts for data │         │  1. Get all aircraft  │
+  │  → creates Aircraft │         │  2. Update positions  │
+  │  → registers it     │         │  3. Check collisions  │
+  │                     │         │  4. Print radar sweep │
+  └────────┬────────────┘         └──────────┬───────────┘
+           │                                  │
+           │         ┌──────────────┐         │
+           └────────►│  AIRCRAFT    │◄────────┘
+                     │  REGISTRY    │
+                     │              │
+                     │ (Concurrent  │
+                     │  HashMap)    │
+                     └──────────────┘
+
+Data Flow:
+  1. Main.java starts the program, seeds 3 test aircraft, starts the radar
+  2. The radar thread reads from the AircraftRegistry every 2 seconds
+  3. The main thread writes to the AircraftRegistry when the user adds/removes aircraft
+  4. ConcurrentHashMap ensures both threads can access the registry simultaneously without crashing
+
+
+═══════════════════════════════════════════════════════════════
+3. PHASE 1 — DOMAIN MODELING: Aircraft.java
+═══════════════════════════════════════════════════════════════
+
+FILE: src/main/java/com/atss/model/Aircraft.java
+
+PURPOSE:
+Represents a single tracked aircraft with a position, speed, and heading.
+This is the core "data object" that every other component works with.
+
+
+KEY CONCEPT: ENCAPSULATION
+--------------------------
+In JavaScript, objects are open — any code can read or modify any property:
+
+  // JavaScript — no protection
+  const aircraft = { callsign: "EAGLE01", speed: 2.5 };
+  aircraft.speed = -9999;  // Nothing prevents this
+
+In Java, we use ENCAPSULATION: all fields are private, and access is controlled through methods (getters and setters):
+
+  // Java — controlled access
+  private double speed;
+
+  public void setSpeed(double speed) {
+      if (speed < 0) {
+          throw new IllegalArgumentException("Speed must be non-negative.");
+      }
+      this.speed = speed;
+  }
+
+WHY THIS MATTERS:
+  • Validation: The setter rejects invalid data (negative speed, heading > 360)
+  • Immutability: callsign is "private final" — once set in the constructor, it can never change. An aircraft's identity is permanent.
+  • Change isolation: If we later change how position is stored (e.g., from doubles to a GeoCoordinate object), only the getter/setter changes — not every class that reads it.
+  • Thread safety hooks: Later, we could add "synchronized" to setters without changing any calling code.
+
+
+CODE BREAKDOWN:
+---------------
+
+FIELDS (lines 21-33):
+
+  private final String callsign;   // final = immutable after construction
+  private double x;                // current X position in nautical miles
+  private double y;                // current Y position in nautical miles
+  private double speed;            // speed per radar tick
+  private double heading;          // direction in degrees (0=North, clockwise)
+
+  - "private" means no outside class can access these directly
+  - "final" on callsign means it can only be assigned once (in the constructor)
+  - All fields use "double" (64-bit decimal) for precision, not "int"
+
+
+CONSTRUCTOR (lines 46-62):
+
+  public Aircraft(String callsign, double x, double y, double speed, double heading) {
+      if (callsign == null || callsign.isBlank()) {
+          throw new IllegalArgumentException("Callsign must not be null or blank.");
+      }
+      if (speed < 0) {
+          throw new IllegalArgumentException("Speed must be non-negative.");
+      }
+      if (heading < 0 || heading >= 360) {
+          throw new IllegalArgumentException("Heading must be in range [0, 360).");
+      }
+      this.callsign = callsign;
+      this.x = x;
+      this.y = y;
+      this.speed = speed;
+      this.heading = heading;
+  }
+
+  - Validates ALL inputs before storing them — "fail fast" principle
+  - "this.callsign" refers to the object's field; "callsign" alone refers to the parameter
+  - If any validation fails, an IllegalArgumentException stops object creation entirely
+
+
+updatePosition() METHOD (lines 77-81):
+
+  public void updatePosition() {
+      double headingRadians = Math.toRadians(this.heading);
+      this.x += this.speed * Math.sin(headingRadians);
+      this.y += this.speed * Math.cos(headingRadians);
+  }
+
+  This is the movement engine. Each radar tick, every aircraft advances based on its speed and heading.
+
+  THE MATH:
+  - Heading is measured clockwise from North (the Y-axis)
+  - To convert polar movement (speed + angle) into X/Y displacement:
+      deltaX = speed × sin(heading)    ← sin maps to the X-axis
+      deltaY = speed × cos(heading)    ← cos maps to the Y-axis
+  - This is REVERSED from standard math convention (where 0° points along the X-axis)
+    because aviation heading uses 0° = North = Y-axis
+  - Math.toRadians() converts degrees to radians because Java's trig functions expect radians
+
+  EXAMPLE:
+  - Aircraft heading 90° (East), speed 2.0
+  - sin(90°) = 1.0, cos(90°) = 0.0
+  - deltaX = 2.0 × 1.0 = 2.0 (moves right)
+  - deltaY = 2.0 × 0.0 = 0.0 (no vertical movement)
+  - Result: aircraft moves 2 units East — correct!
+
+
+GETTERS AND SETTERS (lines 90-174):
+
+  Getters simply return the private field value:
+    public double getX() { return x; }
+
+  Setters include validation where needed:
+    public void setSpeed(double speed) {
+        if (speed < 0) throw new IllegalArgumentException(...);
+        this.speed = speed;
+    }
+
+  NOTE: There is NO setCallsign() method. This is intentional — once an aircraft is created,
+  its identity (callsign) cannot be changed. This is called "selective immutability."
+
+
+toString() METHOD (lines 183-187):
+
+  @Override
+  public String toString() {
+      return String.format("[%s] Position(%.2f, %.2f) | Speed: %.2f | Heading: %.1f°",
+              callsign, x, y, speed, heading);
+  }
+
+  - @Override tells the compiler we're replacing the default toString() from Object
+  - String.format() is like printf — %.2f means "2 decimal places"
+  - This is what prints when the radar displays each aircraft's status
+
+
+═══════════════════════════════════════════════════════════════
+4. PHASE 2 — THE RADAR ENGINE: RadarScanner.java
+═══════════════════════════════════════════════════════════════
+
+FILE: src/main/java/com/atss/engine/RadarScanner.java
+
+PURPOSE:
+A background engine that runs on its own thread, scanning all aircraft every 2 seconds, updating their positions, and printing a radar sweep to the console.
+
+
+KEY CONCEPT: CONCURRENCY AND THE JAVA MEMORY MODEL
+---------------------------------------------------
+In JavaScript, everything runs on one thread (the event loop). If you use setInterval(), the callback still runs on the same thread — it just runs later.
+
+In Java, we have REAL multi-threading. Two threads execute code simultaneously on different CPU cores. This introduces problems JavaScript developers never face:
+
+  PROBLEM 1 — TIMING DRIFT:
+  The naive approach:
+    while (true) {
+        scanAllAircraft();     // takes 300ms
+        Thread.sleep(2000);    // sleeps 2000ms
+    }
+    // Total cycle: 2300ms, not 2000ms. Drift accumulates over time.
+
+  Our approach:
+    executor.scheduleAtFixedRate(this::performSweep, 0, 2, TimeUnit.SECONDS);
+    // Framework compensates: if scan takes 300ms, next tick is in 1700ms
+
+  PROBLEM 2 — SILENT THREAD DEATH:
+  With a raw Thread, if scanAllAircraft() throws an exception, the thread dies
+  silently — no log, no error, no recovery. The radar just stops.
+  ScheduledExecutorService manages thread lifecycle and provides shutdown hooks.
+
+  PROBLEM 3 — NO CLEAN SHUTDOWN:
+  A while(true) loop requires a volatile boolean flag to stop. Miss it and the
+  JVM hangs. The executor provides shutdown() and shutdownNow() methods.
+
+
+THE JAVA MEMORY MODEL (JMM):
+  When two threads share data, each thread may cache values in CPU registers.
+  Thread A writes aircraft.x = 50.0, but Thread B might still see the old value
+  because it's reading from its CPU cache, not main memory.
+
+  The JMM defines "happens-before" relationships — guarantees that writes by one
+  thread are visible to reads by another. ScheduledExecutorService establishes
+  happens-before between each scheduled execution. ConcurrentHashMap (Phase 3)
+  provides its own visibility guarantees.
+
+
+CODE BREAKDOWN:
+---------------
+
+FIELDS (lines 30-46):
+
+  private static final int SCAN_INTERVAL_SECONDS = 2;
+  private static final AtomicInteger THREAD_COUNTER = new AtomicInteger(1);
+  private final ScheduledExecutorService executor;
+  private final Supplier<Collection<Aircraft>> aircraftSupplier;
+  private final AtomicInteger sweepCount = new AtomicInteger(0);
+
+  - SCAN_INTERVAL_SECONDS: How often the radar ticks. "static final" = constant.
+  - AtomicInteger: A thread-safe integer counter. Regular "int" is NOT safe when two
+    threads read/write it simultaneously — you can get stale or torn values.
+    AtomicInteger guarantees that incrementAndGet() is one atomic operation.
+  - ScheduledExecutorService: Java's professional thread scheduling framework.
+  - Supplier<Collection<Aircraft>>: A FUNCTIONAL INTERFACE — think of it as a
+    callback function that returns data. The radar doesn't know WHERE aircraft
+    come from; it just calls the supplier. This is dependency injection.
+
+  JavaScript equivalent of the supplier:
+    // JS
+    const radar = new RadarScanner(() => registry.getAllAircraft());
+    // Java
+    RadarScanner radar = new RadarScanner(registry::getAllAircraft);
+
+
+CONSTRUCTOR (lines 55-67):
+
+  public RadarScanner(Supplier<Collection<Aircraft>> aircraftSupplier) {
+      this.aircraftSupplier = aircraftSupplier;
+      this.executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+          Thread thread = new Thread(runnable);
+          thread.setName("ATSS-RadarThread-" + THREAD_COUNTER.getAndIncrement());
+          thread.setDaemon(true);
+          return thread;
+      });
+  }
+
+  - Executors.newSingleThreadScheduledExecutor(): Creates a thread pool with exactly
+    one thread, dedicated to running our scheduled task.
+  - The lambda (runnable -> { ... }) is a THREAD FACTORY — it customizes each thread:
+      • setName(): Names the thread for debugging. When you have 20 threads and one
+        crashes, the stack trace shows "ATSS-RadarThread-1" instead of "Thread-47."
+      • setDaemon(true): A daemon thread automatically dies when the main thread exits.
+        Without this, forgetting to call shutdown() would make the JVM hang forever.
+
+
+start() METHOD (lines 75-86):
+
+  public void start() {
+      executor.scheduleAtFixedRate(
+          this::performSweep,   // what to run
+          0,                     // initial delay (start immediately)
+          SCAN_INTERVAL_SECONDS, // repeat every 2 seconds
+          TimeUnit.SECONDS       // time unit
+      );
+  }
+
+  - this::performSweep is a METHOD REFERENCE — Java's equivalent of passing a function.
+    It tells the executor "call performSweep() on this object."
+  - scheduleAtFixedRate vs. scheduleWithFixedDelay:
+      • AtFixedRate: runs every 2 seconds regardless of execution time
+      • WithFixedDelay: waits 2 seconds AFTER each run finishes
+    We want consistent tick intervals, so we use AtFixedRate.
+
+
+shutdown() METHOD (lines 94-105):
+
+  public void shutdown() {
+      executor.shutdown();                              // Step 1: stop accepting new tasks
+      try {
+          if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {  // Step 2: wait up to 5s
+              executor.shutdownNow();                   // Step 3: force kill if stuck
+          }
+      } catch (InterruptedException e) {
+          executor.shutdownNow();                       // If waiting is interrupted, force kill
+          Thread.currentThread().interrupt();            // Re-set interrupt flag for callers
+      }
+  }
+
+  This is the standard TWO-PHASE SHUTDOWN pattern in Java:
+  1. shutdown() — "Finish what you're doing, but don't start anything new."
+  2. awaitTermination() — "I'll wait 5 seconds for you to wrap up."
+  3. shutdownNow() — "Time's up, I'm pulling the plug."
+
+  In JavaScript, you'd just call clearInterval(timerId). In Java, the thread might be
+  in the middle of real work (writing to a database, sending a network packet), so we
+  give it time to finish gracefully.
+
+
+performSweep() METHOD (lines 115-138):
+
+  private void performSweep() {
+      try {
+          int sweep = sweepCount.incrementAndGet();
+          Collection<Aircraft> aircraft = aircraftSupplier.get();
+
+          // Print header
+          System.out.printf("RADAR SWEEP #%d | Tracking %d aircraft%n", sweep, aircraft.size());
+
+          // Update and display each aircraft
+          for (Aircraft ac : aircraft) {
+              ac.updatePosition();
+              System.out.println("  " + ac);
+          }
+      } catch (Exception e) {
+          System.err.println("[RADAR ERROR] Sweep failed: " + e.getMessage());
+      }
+  }
+
+  This runs on the RADAR THREAD every 2 seconds:
+  1. Increment sweep counter (atomically — thread-safe)
+  2. Ask the supplier for the current aircraft collection
+  3. Loop through each aircraft, call updatePosition(), print new state
+
+  THE TRY-CATCH IS CRITICAL:
+  If an uncaught exception escapes a ScheduledExecutorService task, the executor
+  SILENTLY cancels all future runs. No error message, no stack trace. The radar
+  would just stop with no indication of why. The try-catch ensures one bad sweep
+  doesn't kill the entire radar. This is a common gotcha in Java concurrency.
+
+
+═══════════════════════════════════════════════════════════════
+5. PHASE 3 — THREAD-SAFE DATA SHARING:
+   AircraftRegistry.java & Main.java
+═══════════════════════════════════════════════════════════════
+
+FILE: src/main/java/com/atss/data/AircraftRegistry.java
+FILE: src/main/java/com/atss/Main.java
+
+PURPOSE:
+AircraftRegistry is the shared data store that both threads access.
+Main.java is the entry point that wires everything together and provides the console interface.
+
+
+KEY CONCEPT: WHY ArrayList WOULD CRASH
+---------------------------------------
+Here's the scenario:
+  - RADAR THREAD: Iterating over aircraft list every 2 seconds (reading)
+  - MAIN THREAD: User types "add" to insert a new aircraft (writing)
+  - Two threads, one shared collection, at the same time.
+
+With a plain ArrayList:
+
+  List<Aircraft> aircraft = new ArrayList<>();
+
+  // Radar thread (iterating):
+  for (Aircraft ac : aircraft) {    // creates an Iterator internally
+      ac.updatePosition();
+  }
+
+  // Main thread (at the SAME time):
+  aircraft.add(new Aircraft("VIPER01", ...));   // modifies the list structure
+
+  RESULT: ConcurrentModificationException
+
+  Java's iterators are FAIL-FAST: the moment an iterator detects the list was
+  structurally modified during iteration, it throws an exception. This is actually
+  a FEATURE — it's better to crash loudly than to silently return corrupted data.
+  In a defense system, silent data corruption could mean missing a collision.
+
+
+CHOOSING THE RIGHT CONCURRENT COLLECTION:
+
+  ┌─────────────────────┬───────────┬─────────────────────┬─────────────────────┐
+  │ Collection          │ Thread-   │ Read Cost           │ Write Cost          │
+  │                     │ Safe?     │                     │                     │
+  ├─────────────────────┼───────────┼─────────────────────┼─────────────────────┤
+  │ HashMap / ArrayList │ NO        │ O(1)                │ O(1)                │
+  │ CopyOnWriteArrayList│ YES       │ O(1) by index       │ O(n) copies array!  │
+  │ ConcurrentHashMap   │ YES       │ O(1) by key         │ O(1) amortized      │
+  └─────────────────────┴───────────┴─────────────────────┴─────────────────────┘
+
+  We chose ConcurrentHashMap because:
+  1. O(1) lookup by callsign (for duplicate detection and removal)
+  2. Weakly consistent iteration — the radar thread sees a safe, recent view that
+     never throws ConcurrentModificationException
+  3. O(1) writes — CopyOnWriteArrayList copies the ENTIRE array on every add, which
+     becomes expensive as the number of aircraft grows
+  4. No global lock — reads and writes to different keys proceed in parallel
+
+
+AircraftRegistry.java — CODE BREAKDOWN:
+----------------------------------------
+
+THE DATA STRUCTURE (line 34):
+
+  private final ConcurrentMap<String, Aircraft> registry = new ConcurrentHashMap<>();
+
+  This single line is the most important in the entire project. It's the bridge
+  between the two threads. ConcurrentHashMap is a hash map where:
+  - Multiple threads can read simultaneously with no locking
+  - Writes to different keys happen in parallel (no global lock)
+  - Iteration is safe during concurrent modification
+
+  JavaScript equivalent: Imagine a Map() you could safely use in two Worker threads
+  without SharedArrayBuffer or Atomics.
+
+
+register() METHOD (lines 47-54):
+
+  public boolean register(Aircraft aircraft) {
+      Aircraft existing = registry.putIfAbsent(aircraft.getCallsign(), aircraft);
+      return existing == null;
+  }
+
+  putIfAbsent() does TWO THINGS as ONE ATOMIC OPERATION:
+  1. Check if the key (callsign) already exists
+  2. If not, insert it
+
+  Why not write it as two steps?
+    if (!registry.containsKey(callsign)) {   // Step 1: check
+        registry.put(callsign, aircraft);     // Step 2: insert
+    }
+
+  Because between Step 1 and Step 2, the RADAR THREAD (or another source) could
+  insert the same callsign. That gap between check and insert is a RACE CONDITION.
+  putIfAbsent() eliminates it by making both steps indivisible.
+
+  Return value: putIfAbsent returns null if the insert succeeded, or the existing
+  value if the key was already there. So "existing == null" means success.
+
+
+getAllAircraft() METHOD (lines 78-80):
+
+  public Collection<Aircraft> getAllAircraft() {
+      return registry.values();
+  }
+
+  Returns a LIVE VIEW, not a copy. The radar thread calls this every sweep, and it
+  sees whatever aircraft exist in the map at that moment. If the main thread adds
+  a new aircraft between sweeps, the next sweep automatically picks it up.
+
+
+Main.java — CODE BREAKDOWN:
+----------------------------
+
+main() METHOD (lines 54-65):
+
+  public static void main(String[] args) {
+      AircraftRegistry registry = new AircraftRegistry();
+      RadarScanner radar = new RadarScanner(registry::getAllAircraft);
+      seedTestAircraft(registry);
+      radar.start();
+      runConsoleLoop(registry, radar);
+  }
+
+  The startup sequence:
+  1. Create the shared registry (the bridge between threads)
+  2. Create the radar, passing a method reference to get aircraft data
+     - registry::getAllAircraft is Java's way of passing a method as a callback
+     - The radar never holds a direct reference to the registry — loose coupling
+  3. Seed 3 test aircraft so the radar has something to track immediately
+  4. Start the radar (launches the background thread)
+  5. Enter the console loop (main thread blocks here waiting for input)
+
+  FROM THIS POINT, TWO THREADS RUN SIMULTANEOUSLY:
+  - Main thread: blocked at scanner.nextLine(), waiting for you to type
+  - Radar thread: ticking every 2 seconds, updating aircraft, printing sweeps
+
+
+seedTestAircraft() METHOD (lines 72-79):
+
+  registry.register(new Aircraft("EAGLE01", 0.0, 0.0, 2.5, 45.0));
+  registry.register(new Aircraft("VIPER02", 10.0, 10.0, 1.8, 180.0));
+  registry.register(new Aircraft("HAWK03", -5.0, 15.0, 3.0, 270.0));
+
+  Pre-loads three aircraft:
+  - EAGLE01: starts at origin (0,0), heading northeast at speed 2.5
+  - VIPER02: starts at (10,10), heading south at speed 1.8
+  - HAWK03: starts at (-5,15), heading west at speed 3.0
+
+
+THE CONSOLE LOOP (lines 91-113):
+
+  while (true) {
+      System.out.print("ATSS> ");
+      String input = scanner.nextLine().trim().toLowerCase();
+
+      switch (input) {
+          case "add"          -> handleAdd(scanner, registry);
+          case "list"         -> handleList(registry);
+          case "remove"       -> handleRemove(scanner, registry);
+          case "help"         -> System.out.println(HELP_TEXT);
+          case "quit", "exit" -> { radar.shutdown(); return; }
+          default             -> System.out.println("Unknown command.");
+      }
+  }
+
+  - Uses Java 14+ SWITCH EXPRESSIONS with arrow syntax (case "add" ->)
+    instead of the old colon-plus-break style. Cleaner, no accidental fall-through.
+  - scanner.nextLine() BLOCKS the main thread until you press Enter.
+    Meanwhile, the radar thread keeps ticking in the background.
+  - "quit" calls radar.shutdown() for graceful two-phase shutdown, then returns
+    to exit the loop.
+
+
+handleAdd() METHOD (lines 121-156):
+
+  Two layers of duplicate protection:
+  1. EARLY CHECK (line 126): containsCallsign() — fast rejection before prompting
+     for all the other fields
+  2. ATOMIC CHECK (line 144): registry.register() uses putIfAbsent() — a second
+     check in case the callsign was added between the early check and the insert
+
+  Error handling catches two types:
+  - NumberFormatException: user typed "abc" for a position
+  - IllegalArgumentException: user entered a negative speed or invalid heading
+  Both are caught cleanly, an error message prints, and the console loop continues.
+
+
+═══════════════════════════════════════════════════════════════
+6. PHASE 4 — COLLISION DETECTION: CollisionDetector.java
+═══════════════════════════════════════════════════════════════
+
+FILE: src/main/java/com/atss/detection/CollisionDetector.java
+
+PURPOSE:
+Checks every pair of aircraft each radar sweep and triggers a [RED ALERT]
+if any two are within 5.0 nautical miles of each other.
+
+
+KEY CONCEPT: THE O(n^2) PAIRWISE COMPARISON
+--------------------------------------------
+If you have n aircraft, you need to check every pair for proximity. The naive
+way is to compare each aircraft against every other:
+
+  // NAIVE: n × n = n^2 comparisons, includes duplicates and self-comparisons
+  for (int i = 0; i < list.size(); i++) {
+      for (int j = 0; j < list.size(); j++) {
+          if (i != j) compare(list[i], list[j]);
+      }
+  }
+
+With 5 aircraft this does 20 comparisons. But A-vs-B and B-vs-A are the same
+check (distance is symmetric), so half are wasted.
+
+  // OPTIMIZED: n(n-1)/2 comparisons, each pair checked exactly once
+  for (int i = 0; i < list.size(); i++) {
+      for (int j = i + 1; j < list.size(); j++) {   // j starts at i+1
+          compare(list[i], list[j]);
+      }
+  }
+
+With 5 aircraft this does 10 comparisons — exactly half. The key insight:
+by starting j at i+1, we automatically skip:
+  - Self-comparisons (i == j)
+  - Reversed duplicates (if we checked A vs B, we never check B vs A)
+
+COMPARISON COUNT FORMULA: n(n-1)/2
+  5 aircraft:   5 × 4 / 2 = 10 comparisons
+  10 aircraft:  10 × 9 / 2 = 45 comparisons
+  100 aircraft: 100 × 99 / 2 = 4,950 comparisons
+
+This is still O(n^2) — it grows quadratically. For thousands of aircraft,
+you'd need spatial partitioning (grid cells, quad-trees). For our simulation
+scale, the optimized loop is more than sufficient.
+
+
+KEY CONCEPT: java.lang.Math LIBRARY
+------------------------------------
+Java provides Math as a utility class full of static methods:
+
+  Math.sqrt(value)          — square root
+  Math.pow(base, exponent)  — exponentiation (for any power)
+  Math.toRadians(degrees)   — converts degrees to radians (used in Phase 1)
+  Math.sin(radians)         — sine function
+  Math.cos(radians)         — cosine function
+  Math.abs(value)           — absolute value
+  Math.max(a, b)            — larger of two values
+  Math.min(a, b)            — smaller of two values
+
+PERFORMANCE TIP: For squaring a number, dx * dx is faster than Math.pow(dx, 2).
+Math.pow() is designed for fractional exponents (like x^2.5) and does extra work
+internally. For simple integer powers, direct multiplication avoids that overhead.
+
+
+THE EUCLIDEAN DISTANCE FORMULA:
+
+  d = sqrt( (x2 - x1)^2 + (y2 - y1)^2 )
+
+  In Java:
+    double dx = b.getX() - a.getX();
+    double dy = b.getY() - a.getY();
+    return Math.sqrt(dx * dx + dy * dy);
+
+  This gives the straight-line distance between two points in 2D space.
+  If this distance is less than 5.0 nautical miles, we trigger the alert.
+
+
+CODE BREAKDOWN:
+---------------
+
+CONSTANTS (lines 25-32):
+
+  private static final double ALERT_THRESHOLD = 5.0;
+  private static final String ANSI_RED = "\u001B[31m";
+  private static final String ANSI_RESET = "\u001B[0m";
+
+  - ALERT_THRESHOLD: Proximity distance that triggers a warning (5 nautical miles)
+  - ANSI_RED / ANSI_RESET: Escape codes that make terminal text red. When the
+    terminal sees \u001B[31m, it switches to red. \u001B[0m resets to default.
+    This makes [RED ALERT] messages actually appear in red in the console.
+
+
+checkCollisions() METHOD (lines 50-73):
+
+  public int checkCollisions(Collection<Aircraft> aircraft) {
+      if (aircraft == null || aircraft.size() < 2) {
+          return 0;   // Need at least 2 aircraft for a collision
+      }
+
+      List<Aircraft> list = new ArrayList<>(aircraft);
+      int alertCount = 0;
+
+      for (int i = 0; i < list.size(); i++) {
+          for (int j = i + 1; j < list.size(); j++) {
+              Aircraft a = list.get(i);
+              Aircraft b = list.get(j);
+
+              double distance = calculateDistance(a, b);
+
+              if (distance < ALERT_THRESHOLD) {
+                  alertCount++;
+                  printAlert(a, b, distance);
+              }
+          }
+      }
+
+      return alertCount;
+  }
+
+  Step by step:
+  1. Early exit if less than 2 aircraft (can't have a collision with one plane)
+  2. Copy collection into an ArrayList for indexed access (the ConcurrentHashMap
+     values() view doesn't support get-by-index)
+  3. Nested loop with j = i + 1 to check each pair exactly once
+  4. For each pair, calculate distance. If below threshold, print the alert.
+  5. Return the total alert count (used by RadarScanner to print a summary)
+
+
+calculateDistance() METHOD (lines 88-92):
+
+  static double calculateDistance(Aircraft a, Aircraft b) {
+      double dx = b.getX() - a.getX();
+      double dy = b.getY() - a.getY();
+      return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  - "static" because this is a pure function — it doesn't access any instance fields
+  - Package-private visibility (no access modifier) so it could be unit tested
+    from within the same package
+  - Uses dx * dx instead of Math.pow(dx, 2) for performance
+
+
+printAlert() METHOD (lines 101-111):
+
+  Outputs a red-colored warning like:
+    ██ [RED ALERT] COLLISION WARNING ██  EAGLE01 ←→ VIPER02  |  Distance: 3.41 nm  (Threshold: 5.0 nm)
+
+  The ██ block characters and red ANSI color make the alert visually striking
+  in the terminal — you can't miss it.
+
+
+INTEGRATION WITH RadarScanner.java:
+-----------------------------------
+The CollisionDetector is called at the end of every radar sweep (after all
+positions are updated):
+
+  // In RadarScanner.performSweep():
+  for (Aircraft ac : aircraft) {
+      ac.updatePosition();
+      System.out.println("  " + ac);
+  }
+
+  int alerts = collisionDetector.checkCollisions(aircraft);
+  if (alerts > 0) {
+      System.out.printf("  ⚠ %d proximity violation(s) detected%n", alerts);
+  }
+
+This means collision checks happen AFTER position updates, so alerts are
+based on the most current positions — not stale data from the previous tick.
+
+
+═══════════════════════════════════════════════════════════════
+7. KEY JAVA CONCEPTS SUMMARY
+═══════════════════════════════════════════════════════════════
+
+CONCEPT                  │ JAVASCRIPT EQUIVALENT        │ JAVA APPROACH
+─────────────────────────┼──────────────────────────────┼────────────────────────────
+Encapsulation            │ Open objects (obj.x = val)   │ private fields + getters/setters
+Immutability             │ Object.freeze() or const     │ private final + no setter
+Type Safety              │ Runtime (typeof checks)      │ Compile-time (compiler enforces)
+Thread Model             │ Single-threaded event loop   │ Real multi-threading on CPU cores
+Scheduled Tasks          │ setInterval()                │ ScheduledExecutorService
+Callback/Supplier        │ () => getData()              │ Supplier<T> + method references
+Thread-Safe Collection   │ Not needed (single thread)   │ ConcurrentHashMap
+Atomic Operations        │ Not needed (single thread)   │ AtomicInteger, putIfAbsent()
+Switch Statements        │ switch with break            │ Arrow syntax (case "x" ->)
+String Templates         │ Template literals (`${x}`)   │ String.format() or text blocks
+Null Safety              │ Optional chaining (?.)       │ Explicit null checks + @throws
+
+
+═══════════════════════════════════════════════════════════════
+8. HOW TO BUILD & RUN
+═══════════════════════════════════════════════════════════════
+
+Prerequisites: Java 21 (installed via Homebrew: brew install openjdk@21)
+
+Set up Java on your PATH (run once per terminal session):
+
+  export JAVA_HOME=/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
+  export PATH="$JAVA_HOME/bin:$PATH"
+
+Navigate to the project:
+
+  cd ~/Desktop/"Air Traffic Surveillance System"
+
+Compile all source files:
+
+  javac -d out src/main/java/com/atss/model/Aircraft.java \
+               src/main/java/com/atss/data/AircraftRegistry.java \
+               src/main/java/com/atss/engine/RadarScanner.java \
+               src/main/java/com/atss/Main.java
+
+Run the application:
+
+  java -cp out com.atss.Main
+
+You will see:
+  - A startup banner
+  - Radar sweeps printing every 2 seconds with aircraft positions updating
+  - An "ATSS>" prompt where you can type commands:
+      add    — add a new aircraft (prompts for callsign, position, speed, heading)
+      list   — show all tracked callsigns
+      remove — remove an aircraft by callsign
+      help   — show available commands
+      quit   — gracefully shut down the radar and exit
+
+
+═══════════════════════════════════════════════════════════════
+END OF GUIDE
+═══════════════════════════════════════════════════════════════
